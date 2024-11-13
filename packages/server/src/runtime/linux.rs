@@ -191,7 +191,7 @@ impl Runtime {
 		let proxy_server_host_url = Url::parse(&proxy_server_host_url)
 			.map_err(|source| tg::error!(!source, "failed to parse the proxy server url"))?;
 
-		// Start the proxy server.
+		// Start the proxy server.f
 		let proxy = Proxy::new(
 			server.clone(),
 			build.id().clone(),
@@ -605,39 +605,39 @@ impl Runtime {
 		};
 
 		// Spawn the log task.
-		let mut reader = log_recv;
-		let log_task = tokio::task::spawn({
-			let server = server.clone();
-			let build = build.clone();
-			let remote = remote.clone();
-			async move {
-				let mut buffer = vec![0; 4096];
-				loop {
-					let size = reader
-						.read(&mut buffer)
-						.await
-						.map_err(|source| tg::error!(!source, "failed to read from the log"))?;
-					if size == 0 {
-						return Ok::<_, tg::Error>(());
-					}
-					let bytes = Bytes::copy_from_slice(&buffer[0..size]);
-					if server.config.advanced.write_build_logs_to_stderr {
-						tokio::io::stderr()
-							.write_all(&bytes)
-							.await
-							.inspect_err(|error| {
-								tracing::error!(?error, "failed to write the build log to stderr");
-							})
-							.ok();
-					}
-					let arg = tg::build::log::post::Arg {
-						bytes,
-						remote: remote.clone(),
-					};
-					build.add_log(&server, arg).await?;
-				}
-			}
-		});
+		// let mut reader = log_recv;
+		// let log_task = tokio::task::spawn({
+		// 	let server = server.clone();
+		// 	let build = build.clone();
+		// 	let remote = remote.clone();
+		// 	async move {
+		// 		let mut buffer = vec![0; 4096];
+		// 		loop {
+		// 			let size = reader
+		// 				.read(&mut buffer)
+		// 				.await
+		// 				.map_err(|source| tg::error!(!source, "failed to read from the log"))?;
+		// 			if size == 0 {
+		// 				return Ok::<_, tg::Error>(());
+		// 			}
+		// 			let bytes = Bytes::copy_from_slice(&buffer[0..size]);
+		// 			if server.config.advanced.write_build_logs_to_stderr {
+		// 				tokio::io::stderr()
+		// 					.write_all(&bytes)
+		// 					.await
+		// 					.inspect_err(|error| {
+		// 						tracing::error!(?error, "failed to write the build log to stderr");
+		// 					})
+		// 					.ok();
+		// 			}
+		// 			let arg = tg::build::log::post::Arg {
+		// 				bytes,
+		// 				remote: remote.clone(),
+		// 			};
+		// 			build.add_log(&server, arg).await?;
+		// 		}
+		// 	}
+		// });
 
 		// Receive the guest process's PID from the socket.
 		let guest_process_pid: libc::pid_t = host_socket.read_i32_le().await.map_err(|error| {
