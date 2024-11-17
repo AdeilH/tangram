@@ -32,6 +32,7 @@ async fn file_through_symlink() -> tg::Result<()> {
    				"item": tg.file({
    					"contents": tg.leaf("hello, world!"),
    				}),
+   				"path": "../b/e/d",
    			},
    		},
    	}),
@@ -67,12 +68,9 @@ async fn external_symlink() -> tg::Result<()> {
    		"dependencies": {
    			"../b/c": {
    				"item": tg.symlink({
-   					"artifact": tg.directory({
-   						"d": tg.file({
-   							"contents": tg.leaf("hello, world!"),
-   						}),
-   					}),
+   					"subpath": "e",
    				}),
+   				"path": "../b/c",
    			},
    		},
    	}),
@@ -109,6 +107,8 @@ async fn simple_path_dependency() -> tg::Result<()> {
    						"contents": tg.leaf(""),
    					}),
    				}),
+   				"path": "../bar",
+   				"subpath": "tangram.ts",
    			},
    		},
    	}),
@@ -121,7 +121,7 @@ async fn simple_path_dependency() -> tg::Result<()> {
 }
 
 #[tokio::test]
-async fn nested_packages() -> tg::Result<()> {
+async fn package_with_ndested_dependencies() -> tg::Result<()> {
 	test(
 		temp::directory! {
 			"foo" => temp::directory! {
@@ -144,58 +144,68 @@ async fn nested_packages() -> tg::Result<()> {
 		|_, _, output| async move {
 			assert_snapshot!(output, @r#"
    tg.directory({
-   	"graph": tg.graph({
-   		"nodes": [
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"bar": 2,
-   					"baz": tg.directory({
+   	"bar": tg.directory({
+   		"tangram.ts": tg.file({
+   			"contents": tg.leaf("
+   						import * as baz from "../baz";
+   					"),
+   			"dependencies": {
+   				"../baz": {
+   					"item": tg.directory({
    						"tangram.ts": tg.file({
    							"contents": tg.leaf(""),
    						}),
    					}),
-   					"tangram.ts": 1,
+   					"path": "baz",
+   					"subpath": "tangram.ts",
    				},
    			},
-   			{
-   				"kind": "file",
-   				"contents": tg.leaf("
+   		}),
+   	}),
+   	"baz": tg.directory({
+   		"tangram.ts": tg.file({
+   			"contents": tg.leaf(""),
+   		}),
+   	}),
+   	"tangram.ts": tg.file({
+   		"contents": tg.leaf("
    					import * as bar from "./bar";
    					import * as baz from "./baz";
    				"),
-   				"dependencies": {
-   					"./bar": {
-   						"item": 0,
-   						"subpath": "./bar",
-   					},
-   					"./baz": {
-   						"item": 0,
-   						"subpath": "./baz",
-   					},
-   				},
-   			},
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"tangram.ts": 3,
-   				},
-   			},
-   			{
-   				"kind": "file",
-   				"contents": tg.leaf("
+   		"dependencies": {
+   			"./bar": {
+   				"item": tg.directory({
+   					"tangram.ts": tg.file({
+   						"contents": tg.leaf("
    						import * as baz from "../baz";
    					"),
-   				"dependencies": {
-   					"../baz": {
-   						"item": 0,
-   						"subpath": "./baz",
-   					},
-   				},
+   						"dependencies": {
+   							"../baz": {
+   								"item": tg.directory({
+   									"tangram.ts": tg.file({
+   										"contents": tg.leaf(""),
+   									}),
+   								}),
+   								"path": "baz",
+   								"subpath": "tangram.ts",
+   							},
+   						},
+   					}),
+   				}),
+   				"path": "bar",
+   				"subpath": "tangram.ts",
    			},
-   		],
+   			"./baz": {
+   				"item": tg.directory({
+   					"tangram.ts": tg.file({
+   						"contents": tg.leaf(""),
+   					}),
+   				}),
+   				"path": "baz",
+   				"subpath": "tangram.ts",
+   			},
+   		},
    	}),
-   	"node": 0,
    })
    "#);
 			Ok::<_, tg::Error>(())
@@ -205,7 +215,7 @@ async fn nested_packages() -> tg::Result<()> {
 }
 
 #[tokio::test]
-async fn package_with_submodules() -> tg::Result<()> {
+async fn package_with_cyclic_modules() -> tg::Result<()> {
 	test(
 		temp::directory! {
 			"package" => temp::directory! {
@@ -233,7 +243,8 @@ async fn package_with_submodules() -> tg::Result<()> {
    				"dependencies": {
    					"./foo.tg.ts": {
    						"item": 0,
-   						"subpath": "./foo.tg.ts",
+   						"path": "",
+   						"subpath": "foo.tg.ts",
    					},
    				},
    			},
@@ -243,13 +254,48 @@ async fn package_with_submodules() -> tg::Result<()> {
    				"dependencies": {
    					"./tangram.ts": {
    						"item": 0,
-   						"subpath": "./tangram.ts",
+   						"path": "",
+   						"subpath": "tangram.ts",
    					},
    				},
    			},
    		],
    	}),
    	"node": 0,
+   })
+   "#);
+			Ok::<_, tg::Error>(())
+		},
+	)
+	.await
+}
+
+#[tokio::test]
+async fn directory_with_nested_packages() -> tg::Result<()> {
+	test(
+		temp::directory! {
+			"foo" => temp::directory! {
+				"tangram.ts" => "",
+			},
+			"bar" => temp::directory! {
+				"tangram.ts" => "",
+			}
+		},
+		"",
+		false,
+		|_, _, output| async move {
+			assert_snapshot!(output, @r#"
+   tg.directory({
+   	"bar": tg.directory({
+   		"tangram.ts": tg.file({
+   			"contents": tg.leaf(""),
+   		}),
+   	}),
+   	"foo": tg.directory({
+   		"tangram.ts": tg.file({
+   			"contents": tg.leaf(""),
+   		}),
+   	}),
    })
    "#);
 			Ok::<_, tg::Error>(())
@@ -271,21 +317,9 @@ async fn symlink() -> tg::Result<()> {
 		|_, _, output| async move {
 			assert_snapshot!(output, @r#"
    tg.directory({
-   	"graph": tg.graph({
-   		"nodes": [
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"link": 1,
-   				},
-   			},
-   			{
-   				"kind": "symlink",
-   				"artifact": 0,
-   			},
-   		],
+   	"link": tg.symlink({
+   		"subpath": ".",
    	}),
-   	"node": 0,
    })
    "#);
 			Ok::<_, tg::Error>(())
@@ -326,6 +360,8 @@ async fn cyclic_dependencies() -> tg::Result<()> {
    				"dependencies": {
    					"../bar": {
    						"item": 2,
+   						"path": "../bar",
+   						"subpath": "tangram.ts",
    					},
    				},
    			},
@@ -341,6 +377,8 @@ async fn cyclic_dependencies() -> tg::Result<()> {
    				"dependencies": {
    					"../foo": {
    						"item": 0,
+   						"path": "",
+   						"subpath": "tangram.ts",
    					},
    				},
    			},
@@ -372,37 +410,17 @@ async fn directory() -> tg::Result<()> {
 		|_, _, output| async move {
 			assert_snapshot!(output, @r#"
    tg.directory({
-   	"graph": tg.graph({
-   		"nodes": [
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"hello.txt": tg.file({
-   						"contents": tg.leaf("Hello, world!"),
-   					}),
-   					"link": 3,
-   					"subdirectory": 1,
-   				},
-   			},
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"sublink": 2,
-   				},
-   			},
-   			{
-   				"kind": "symlink",
-   				"artifact": 0,
-   				"subpath": "link",
-   			},
-   			{
-   				"kind": "symlink",
-   				"artifact": 0,
-   				"subpath": "hello.txt",
-   			},
-   		],
+   	"hello.txt": tg.file({
+   		"contents": tg.leaf("Hello, world!"),
    	}),
-   	"node": 0,
+   	"link": tg.symlink({
+   		"subpath": "hello.txt",
+   	}),
+   	"subdirectory": tg.directory({
+   		"sublink": tg.symlink({
+   			"subpath": "../link",
+   		}),
+   	}),
    })
    "#);
 			Ok::<_, tg::Error>(())
@@ -481,25 +499,23 @@ async fn import_from_parent() -> tg::Result<()> {
    			{
    				"kind": "directory",
    				"entries": {
-   					"baz": 2,
+   					"baz": 1,
    					"foo": tg.directory({}),
-   					"tangram.ts": 1,
-   				},
-   			},
-   			{
-   				"kind": "file",
-   				"contents": tg.leaf("import patches from "./foo" with { type: "directory" };"),
-   				"dependencies": {
-   					"./foo": {
-   						"item": 0,
-   						"subpath": "./foo",
-   					},
+   					"tangram.ts": tg.file({
+   						"contents": tg.leaf("import patches from "./foo" with { type: "directory" };"),
+   						"dependencies": {
+   							"./foo": {
+   								"item": tg.directory({}),
+   								"path": "foo",
+   							},
+   						},
+   					}),
    				},
    			},
    			{
    				"kind": "directory",
    				"entries": {
-   					"mod.tg.ts": 3,
+   					"mod.tg.ts": 2,
    				},
    			},
    			{
@@ -508,7 +524,8 @@ async fn import_from_parent() -> tg::Result<()> {
    				"dependencies": {
    					"..": {
    						"item": 0,
-   						"subpath": "./baz",
+   						"path": "",
+   						"subpath": "tangram.ts",
    					},
    				},
    			},
@@ -546,51 +563,23 @@ async fn directory_destructive() -> tg::Result<()> {
 		|_, _, output| async move {
 			assert_snapshot!(output, @r#"
    tg.directory({
-   	"graph": tg.graph({
-   		"nodes": [
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"a": 1,
-   				},
-   			},
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"b": 4,
-   					"d": 2,
-   					"f": tg.directory({
-   						"g": tg.file({
-   							"contents": tg.leaf(""),
-   						}),
-   					}),
-   				},
-   			},
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"e": 3,
-   				},
-   			},
-   			{
-   				"kind": "symlink",
-   				"artifact": 0,
-   				"subpath": "a/f/g",
-   			},
-   			{
-   				"kind": "directory",
-   				"entries": {
-   					"c": 5,
-   				},
-   			},
-   			{
-   				"kind": "symlink",
-   				"artifact": 0,
-   				"subpath": "a/d/e",
-   			},
-   		],
+   	"a": tg.directory({
+   		"b": tg.directory({
+   			"c": tg.symlink({
+   				"subpath": "../../a/d/e",
+   			}),
+   		}),
+   		"d": tg.directory({
+   			"e": tg.symlink({
+   				"subpath": "../../a/f/g",
+   			}),
+   		}),
+   		"f": tg.directory({
+   			"g": tg.file({
+   				"contents": tg.leaf(""),
+   			}),
+   		}),
    	}),
-   	"node": 0,
    })
    "#);
 			Ok::<_, tg::Error>(())

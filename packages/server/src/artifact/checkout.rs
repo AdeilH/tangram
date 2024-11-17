@@ -1,4 +1,4 @@
-use crate::{temp::Temp, util::path::Ext, Server};
+use crate::{temp::Temp, Server};
 use dashmap::{DashMap, DashSet};
 use futures::{stream::FuturesUnordered, Stream, StreamExt as _, TryStreamExt as _};
 use itertools::Itertools;
@@ -37,15 +37,25 @@ impl Server {
 		impl Stream<Item = tg::Result<tg::progress::Event<tg::artifact::checkout::Output>>>,
 	> {
 		let progress = crate::progress::Handle::new();
-		tokio::spawn({
+		let task = tokio::spawn({
 			let server = self.clone();
 			let id = id.clone();
 			let progress = progress.clone();
+			async move { server.check_out_artifact_task(&id, arg, &progress).await }
+		});
+		tokio::spawn({
+			let progress = progress.clone();
 			async move {
-				let result = server.check_out_artifact_task(&id, arg, &progress).await;
-				match result {
-					Ok(output) => progress.output(output),
-					Err(error) => progress.error(error),
+				match task.await {
+					Ok(Ok(output)) => {
+						progress.output(output);
+					},
+					Ok(Err(error)) => {
+						progress.error(error);
+					},
+					Err(source) => {
+						progress.error(tg::error!(!source, "the task panicked"));
+					},
 				};
 			}
 		});
@@ -614,8 +624,8 @@ impl Server {
 		// Render the target.
 		let mut target: PathBuf = PathBuf::new();
 		if let Some(artifact) = &artifact {
-			let diff = cache_directory.diff(path.parent().unwrap()).unwrap();
-			let path = diff.join(artifact.id(self).await?.to_string());
+			let path = crate::util::path::diff(path.parent().unwrap(), cache_directory).unwrap();
+			let path = path.join(artifact.id(self).await?.to_string());
 			target.push(path);
 		}
 		if let Some(subpath) = subpath {
@@ -854,6 +864,7 @@ impl Server {
 					};
 					let dependency = tg::Referent {
 						item,
+						path: referent.path.clone(),
 						subpath: referent.subpath.clone(),
 						tag: referent.tag.clone(),
 					};
@@ -994,9 +1005,15 @@ impl Server {
 								object => Either::Right(object.id(self).await?),
 							},
 						};
+						let path = referent.path.clone();
 						let subpath = referent.subpath.clone();
 						let tag = referent.tag.clone();
-						let dependency = tg::Referent { item, subpath, tag };
+						let dependency = tg::Referent {
+							item,
+							path,
+							subpath,
+							tag,
+						};
 						dependencies.insert(reference.clone(), dependency);
 					}
 					let contents = file.contents.id(self).await?;

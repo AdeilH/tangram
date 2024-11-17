@@ -1,4 +1,4 @@
-use crate::{util::path::Ext, Server};
+use crate::Server;
 use std::path::{Path, PathBuf};
 use tangram_client as tg;
 use tangram_either::Either;
@@ -30,11 +30,13 @@ impl Server {
 					kind,
 					referent: tg::Referent {
 						item: tg::module::Item::Object(package.clone().into()),
+						path: None,
 						subpath: Some(root_module_name.into()),
 						tag: None,
 					},
 				})
 			},
+
 			Either::Right(path) => {
 				// Get the root module file name.
 				let root_module_file_name =
@@ -50,6 +52,7 @@ impl Server {
 					kind,
 					referent: tg::Referent {
 						item: tg::module::Item::Path(path),
+						path: None,
 						subpath: Some(root_module_file_name.into()),
 						tag: None,
 					},
@@ -103,13 +106,14 @@ impl Server {
 		let kind = infer_module_kind(file_name)?;
 
 		// Get the subpath.
-		let subpath = path.diff(&package).unwrap();
+		let subpath = path.strip_prefix(&package).unwrap().to_owned();
 
 		// Create the module.
 		Ok(tg::Module {
 			kind,
 			referent: tg::Referent {
 				item: tg::module::Item::Path(package.clone()),
+				path: None,
 				subpath: Some(subpath),
 				tag: None,
 			},
@@ -132,11 +136,11 @@ pub(crate) fn infer_module_kind(path: impl AsRef<Path>) -> tg::Result<tg::module
 
 async fn try_get_root_module_name_for_path(path: &Path) -> tg::Result<Option<String>> {
 	// Collect the file names of the directory.
-	let mut entries = tokio::fs::read_dir(&path).await.map_err(
+	let mut file_names = Vec::new();
+	let mut read_dir = tokio::fs::read_dir(&path).await.map_err(
 		|source| tg::error!(!source, %path = path.display(), "failed to read directory"),
 	)?;
-	let mut file_names = Vec::new();
-	while let Some(entry) = entries.next_entry().await.map_err(
+	while let Some(entry) = read_dir.next_entry().await.map_err(
 		|source| tg::error!(!source, %path = path.display(), "failed to get directory entry"),
 	)? {
 		let Some(file_name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
@@ -144,11 +148,7 @@ async fn try_get_root_module_name_for_path(path: &Path) -> tg::Result<Option<Str
 		};
 		file_names.push(file_name);
 	}
-
-	// Sort to ensure a stable order/precedence.
 	file_names.sort();
-
-	// Get the root module file name.
 	let root_module_file_name = file_names
 		.into_iter()
 		.find(|name| tg::package::is_root_module_path(name.as_ref()));

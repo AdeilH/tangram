@@ -1,4 +1,4 @@
-use crate::{util::path::Ext as _, Server};
+use crate::Server;
 use futures::{Stream, StreamExt as _};
 use std::{path::PathBuf, pin::pin};
 use tangram_client as tg;
@@ -18,7 +18,7 @@ mod unify;
 pub const IGNORE_FILES: [&str; 3] = [".tangramignore", ".tgignore", ".gitignore"];
 
 // Default list of ignore patterns.
-pub const DENY: [&str; 2] = [".DS_STORE", ".git"];
+pub const DENY: [&str; 2] = [".DS_Store", ".git"];
 
 // Default list of ignore override patterns.
 pub const ALLOW: [&str; 0] = [];
@@ -31,14 +31,24 @@ impl Server {
 		impl Stream<Item = tg::Result<tg::progress::Event<tg::artifact::checkin::Output>>>,
 	> {
 		let progress = crate::progress::Handle::new();
-		tokio::spawn({
+		let task = tokio::spawn({
 			let server = self.clone();
 			let progress = progress.clone();
+			async move { server.check_in_artifact_task(arg, Some(&progress)).await }
+		});
+		tokio::spawn({
+			let progress = progress.clone();
 			async move {
-				let result = server.check_in_artifact_task(arg, Some(&progress)).await;
-				match result {
-					Ok(output) => progress.output(output),
-					Err(error) => progress.error(error),
+				match task.await {
+					Ok(Ok(output)) => {
+						progress.output(output);
+					},
+					Ok(Err(error)) => {
+						progress.error(error);
+					},
+					Err(source) => {
+						progress.error(tg::error!(!source, "the task panicked"));
+					},
 				};
 			}
 		});
@@ -49,34 +59,32 @@ impl Server {
 	/// Attempt to store an artifact in the database.
 	async fn check_in_artifact_task(
 		&self,
-		arg: tg::artifact::checkin::Arg,
+		mut arg: tg::artifact::checkin::Arg,
 		progress: Option<&crate::progress::Handle<tg::artifact::checkin::Output>>,
 	) -> tg::Result<tg::artifact::checkin::Output> {
+		// Canonicalize the path's parent.
+		arg.path = crate::util::fs::canonicalize_parent(&arg.path)
+			.await
+			.map_err(|source| tg::error!(!source, "failed to canonicalize the path's parent"))?;
+
 		// If this is a checkin of a path in the checkouts directory, then retrieve the corresponding artifact.
-		if let Some(path) = arg
-			.path
-			.diff(self.cache_path())
-			.filter(|path| matches!(path.components().next(), Some(std::path::Component::CurDir)))
-		{
-			let components = path.components().collect::<Vec<_>>();
-			let id = components
-				.get(1)
+		if let Ok(path) = arg.path.strip_prefix(self.cache_path()) {
+			let id = path
+				.components()
+				.next()
 				.map(|component| {
 					let std::path::Component::Normal(name) = component else {
 						return Err(tg::error!("invalid path"));
 					};
 					name.to_str().ok_or_else(|| tg::error!("non-utf8 path"))
 				})
-				.ok_or_else(|| tg::error!("cannot check in the checkouts directory"))??
+				.ok_or_else(|| tg::error!("cannot check in the cache directory"))??
 				.parse()?;
-			if components.len() < 2 {
+			if path.components().count() == 1 {
 				let output = tg::artifact::checkin::Output { artifact: id };
 				return Ok(output);
 			}
-			let mut path = PathBuf::new();
-			for component in &components[2..] {
-				path.push(component);
-			}
+			let path = path.components().skip(1).collect::<PathBuf>();
 			let artifact = tg::Artifact::with_id(id);
 			let directory = artifact
 				.try_unwrap_directory()
@@ -95,28 +103,13 @@ impl Server {
 	// Check in the artifact.
 	async fn check_in_artifact_inner(
 		&self,
-		mut arg: tg::artifact::checkin::Arg,
+		arg: tg::artifact::checkin::Arg,
 		progress: Option<&crate::progress::Handle<tg::artifact::checkin::Output>>,
 	) -> tg::Result<tg::artifact::checkin::Output> {
 		// Verify the path is absolute.
 		if !arg.path.is_absolute() {
 			return Err(tg::error!(%path = arg.path.display(), "expected an absolute path"));
 		}
-
-		// Canonicalize the path.
-		let path = tokio::fs::canonicalize(
-			arg.path
-				.parent()
-				.ok_or_else(|| tg::error!("expected a parent path"))?,
-		)
-		.await
-		.map_err(|source| tg::error!(!source, "failed to canonicalize the path"))?
-		.join(
-			arg.path
-				.file_name()
-				.ok_or_else(|| tg::error!("expected a non-empty path"))?,
-		);
-		arg.path = path;
 
 		// Create the input graph.
 		let input = self
@@ -155,9 +148,7 @@ impl Server {
 			.await?;
 
 		// Write lockfiles.
-		let lockfile = self.create_lockfile(&object).await?;
-		self.write_lockfiles(&input, &lockfile, &object.paths)
-			.await?;
+		self.write_lockfile(&input, &object).await?;
 
 		// Write the artifact data to the database.
 		self.write_output_to_database(&output).await?;

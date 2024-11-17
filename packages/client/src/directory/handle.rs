@@ -1,6 +1,6 @@
 use super::{Builder, Data, Id, Object};
 use crate as tg;
-use futures::{stream::FuturesOrdered, TryStreamExt as _};
+use futures::{stream::FuturesUnordered, Future, FutureExt as _, TryStreamExt as _};
 use std::{
 	collections::BTreeMap,
 	path::{Path, PathBuf},
@@ -126,12 +126,26 @@ impl Directory {
 				Ok(Data::Graph { graph, node })
 			},
 			Object::Normal { entries } => {
+				#[allow(clippy::manual_async_fn)]
+				fn future(
+					handle: impl tg::Handle,
+					artifact: tg::Artifact,
+				) -> impl Future<Output = tg::Result<tg::artifact::Id>> + Send {
+					async move { artifact.id(&handle).await }
+				}
 				let entries = entries
 					.iter()
-					.map(|(name, artifact)| async move {
-						Ok::<_, tg::Error>((name.clone(), artifact.id(handle).await?))
+					.map(|(name, artifact)| {
+						let artifact = artifact.clone();
+						let handle = handle.clone();
+						async move {
+							let artifact = tokio::spawn(future(handle, artifact))
+								.map(|result| result.unwrap())
+								.await?;
+							Ok::<_, tg::Error>((name.clone(), artifact))
+						}
 					})
-					.collect::<FuturesOrdered<_>>()
+					.collect::<FuturesUnordered<_>>()
 					.try_collect()
 					.await?;
 				Ok(Data::Normal { entries })
@@ -341,4 +355,15 @@ impl std::fmt::Display for Directory {
 		printer.directory(self)?;
 		Ok(())
 	}
+}
+
+#[macro_export]
+macro_rules! directory {
+	{ $($name:expr => $artifact:expr),* $(,)? } => {{
+		let mut entries = ::std::collections::BTreeMap::new();
+		$(
+			entries.insert($name.into(), $artifact.into());
+		)*
+		$crate::Directory::with_entries(entries)
+	}};
 }

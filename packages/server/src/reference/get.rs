@@ -15,6 +15,7 @@ impl Server {
 				let item = Either::Left(build.clone());
 				let output = tg::Referent {
 					item,
+					path: None,
 					subpath: None,
 					tag: None,
 				};
@@ -22,9 +23,13 @@ impl Server {
 			},
 			tg::reference::Item::Object(object) => {
 				let item = Either::Right(object.clone());
+				let subpath = reference
+					.options()
+					.and_then(|options| options.subpath.clone());
 				let output = tg::Referent {
 					item,
-					subpath: None,
+					path: None,
+					subpath,
 					tag: None,
 				};
 				Ok(Some(output))
@@ -44,9 +49,13 @@ impl Server {
 					.and_then(|event| event.try_unwrap_output().ok())
 					.ok_or_else(|| tg::error!("stream ended without output"))?;
 				let item = Either::Right(output.artifact.into());
+				let subpath = reference
+					.options()
+					.and_then(|options| options.subpath.clone());
 				let output = tg::Referent {
 					item,
-					subpath: None,
+					subpath,
+					path: None,
 					tag: None,
 				};
 				Ok(Some(output))
@@ -59,9 +68,13 @@ impl Server {
 				else {
 					return Ok(None);
 				};
+				let subpath = reference
+					.options()
+					.and_then(|options| options.subpath.clone());
 				let output = tg::Referent {
 					item,
-					subpath: None,
+					path: None,
+					subpath,
 					tag: Some(tag),
 				};
 				Ok(Some(output))

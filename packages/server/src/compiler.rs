@@ -629,6 +629,7 @@ impl Compiler {
 			let item = tg::module::Item::Path(path.to_owned());
 			let referent = tg::Referent {
 				item,
+				path: None,
 				subpath: None,
 				tag: None,
 			};
@@ -636,7 +637,7 @@ impl Compiler {
 			return Ok(module);
 		}
 
-		// Handle a path in the checkouts directory.
+		// Handle a path in the cache directory.
 		if let Ok(path) = path.strip_prefix(self.server.cache_path()) {
 			#[allow(clippy::case_sensitive_file_extension_comparisons)]
 			let kind = if path.extension().is_some_and(|extension| extension == "js") {
@@ -676,6 +677,7 @@ impl Compiler {
 			};
 			let referent = tg::Referent {
 				item,
+				path: None,
 				subpath,
 				tag: None,
 			};

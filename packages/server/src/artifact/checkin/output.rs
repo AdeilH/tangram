@@ -1,5 +1,5 @@
 use super::{input, object};
-use crate::{temp::Temp, util::path::Ext as _, Server};
+use crate::{temp::Temp, Server};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt as _};
 use indoc::formatdoc;
 use std::{
@@ -133,9 +133,7 @@ impl Server {
 		// Return the created node.
 		Ok(output_index)
 	}
-}
 
-impl Server {
 	pub async fn write_output_to_database(&self, output: &Graph) -> tg::Result<()> {
 		// Get a database connection.
 		let mut connection = self
@@ -233,9 +231,7 @@ impl Server {
 
 		Ok(())
 	}
-}
 
-impl Server {
 	/// Write hardlinks in the cache directory.
 	pub async fn write_links(
 		&self,
@@ -537,8 +533,11 @@ impl Server {
 			for edge in dependencies {
 				let input_index = output.nodes[edge.node].input;
 				let input_node_ = &input.nodes[input_index];
-				let diff = input_node_.arg.path.diff(&input_node.arg.path).unwrap();
-				let diff = diff.strip_prefix(".").unwrap_or(diff.as_ref());
+				let diff = input_node_
+					.arg
+					.path
+					.strip_prefix(&input_node.arg.path)
+					.unwrap();
 				let dest = dest.join(diff);
 				Box::pin(self.copy_or_move_all(input, output, edge.node, dest, visited, progress))
 					.await?;
@@ -715,36 +714,40 @@ impl Server {
 		output: &Graph,
 		symlink: usize,
 	) -> tg::Result<PathBuf> {
-		// Find how deep this node is in the output tree.
-		let mut input_index = output.nodes[symlink].input;
-		let mut depth = 0;
-		loop {
-			let Some(parent) = input.nodes[input_index].parent else {
-				break;
-			};
-			depth += 1;
-			input_index = parent;
-		}
-
 		// Get the outgoing edge.
-		let output_edge = output.nodes[symlink]
-			.edges
-			.first()
-			.ok_or_else(|| tg::error!("invalid symlink node"))?
-			.clone();
+		if let Some(output_edge) = output.nodes[symlink].edges.first() {
+			// Find how deep this node is in the output tree.
+			let mut input_index = output.nodes[symlink].input;
+			let mut depth = 0;
+			loop {
+				let Some(parent) = input.nodes[input_index].parent else {
+					break;
+				};
+				depth += 1;
+				input_index = parent;
+			}
 
-		// Create the target.
-		let id = output.nodes[output_edge.node].id.to_string();
-		let subpath = output_edge.subpath.unwrap_or_default();
+			// Create the target.
+			let id = output.nodes[output_edge.node].id.to_string();
+			let subpath = output_edge.subpath.clone().unwrap_or_default();
 
-		let components = (0..depth)
-			.map(|_| std::path::Component::ParentDir)
-			.chain(std::iter::once(std::path::Component::Normal(OsStr::new(
-				&id,
-			))))
-			.chain(subpath.components());
+			let components = (0..depth)
+				.map(|_| std::path::Component::ParentDir)
+				.chain(std::iter::once(std::path::Component::Normal(OsStr::new(
+					&id,
+				))))
+				.chain(subpath.components());
 
-		Ok(components.collect())
+			Ok(components.collect())
+		} else if let tg::artifact::Data::Symlink(tg::symlink::Data::Normal {
+			artifact: None,
+			subpath: Some(target),
+		}) = &output.nodes[symlink].data
+		{
+			Ok(target.clone())
+		} else {
+			return Err(tg::error!("invalid symlink"));
+		}
 	}
 }
 

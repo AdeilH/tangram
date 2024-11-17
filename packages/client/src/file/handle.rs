@@ -134,7 +134,8 @@ impl File {
 						let object = referent.item.id(handle).await?;
 						let dependency = tg::Referent {
 							item: object,
-							subpath: None,
+							path: referent.path.clone(),
+							subpath: referent.subpath.clone(),
 							tag: referent.tag.clone(),
 						};
 						Ok::<_, tg::Error>((reference.clone(), dependency))
@@ -238,7 +239,8 @@ impl File {
 						};
 						let referent = tg::Referent {
 							item,
-							subpath: None,
+							path: referent.path.clone(),
+							subpath: referent.subpath.clone(),
 							tag: referent.tag.clone(),
 						};
 						Ok::<_, tg::Error>((reference.clone(), referent))
@@ -303,6 +305,7 @@ impl File {
 				};
 				Some(tg::Referent {
 					item,
+					path: referent.path.clone(),
 					subpath: referent.subpath.clone(),
 					tag: referent.tag.clone(),
 				})
@@ -391,7 +394,14 @@ impl std::fmt::Display for File {
 
 #[macro_export]
 macro_rules! file {
-	($contents:expr) => {
-		$crate::File::with_contents($contents)
+	(@$builder:ident executable = $executable:expr $(, $($arg:tt)*)?) => {
+		$builder = $builder.executable($executable);
+		$crate::file!(@$builder $($($arg)*)?)
 	};
+	(@$builder:ident) => {};
+	($contents:expr $(, $($arg:tt)*)?) => {{
+		let mut builder = $crate::file::Builder::new($contents);
+		$crate::file!(@builder $($($arg)*)?);
+		builder.build()
+	}};
 }

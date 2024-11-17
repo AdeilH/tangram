@@ -1,4 +1,4 @@
-use crate::{util::path::Ext as _, Server};
+use crate::Server;
 use futures::{stream::FuturesUnordered, TryStreamExt as _};
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -19,8 +19,8 @@ pub struct Graph {
 pub struct Node {
 	pub arg: tg::artifact::checkin::Arg,
 	pub edges: Vec<Edge>,
-	pub metadata: std::fs::Metadata,
 	pub lockfile: Option<(Arc<tg::Lockfile>, usize)>,
+	pub metadata: std::fs::Metadata,
 	pub parent: Option<usize>,
 }
 
@@ -30,6 +30,7 @@ pub struct Edge {
 	pub subpath: Option<PathBuf>,
 	pub node: Option<usize>,
 	pub object: Option<tg::object::Id>,
+	pub path: Option<PathBuf>,
 	pub tag: Option<tg::Tag>,
 }
 
@@ -147,19 +148,14 @@ impl Server {
 		} else {
 			let referrer = referrer.ok_or_else(|| tg::error!("expected a referrer"))?;
 			let referrer_path = state.read().await.graph.nodes[referrer].arg.path.clone();
-			referrer_path.join(path.strip_prefix("./").unwrap_or(path))
+			referrer_path.join(path)
 		};
-		let parent = path.parent().unwrap();
-		let name = path.file_name().unwrap_or_default();
 
-		// Canonicalize the parent and join with the file name.
+		// Canonicalize the path.
 		let permit = self.file_descriptor_semaphore.acquire().await.unwrap();
-		let absolute_path = tokio::fs::canonicalize(parent)
-			.await
-			.map_err(
-				|source| tg::error!(!source, %path = parent.display(), "failed to canonicalize the path"),
-			)?
-			.join(name);
+		let absolute_path = crate::util::fs::canonicalize_parent(&path).await.map_err(
+			|source| tg::error!(!source, %path = path.display(), "failed to canonicalize path"),
+		)?;
 		drop(permit);
 
 		// Get the file system metadata.
@@ -195,8 +191,8 @@ impl Server {
 		let node = Node {
 			arg: arg_,
 			edges: Vec::new(),
-			metadata: metadata.clone(),
 			lockfile: None,
+			metadata: metadata.clone(),
 			parent,
 		};
 		state_.graph.nodes.push(node);
@@ -279,11 +275,11 @@ impl Server {
 		// Get the directory entries.
 		let mut names = Vec::new();
 		let permit = self.file_descriptor_semaphore.acquire().await.unwrap();
-		let mut entries = tokio::fs::read_dir(&path).await.map_err(
+		let mut read_dir = tokio::fs::read_dir(&path).await.map_err(
 			|source| tg::error!(!source, %path = path.display(), "failed to get the directory entries"),
 		)?;
 		loop {
-			let Some(entry) = entries.next_entry().await.map_err(
+			let Some(entry) = read_dir.next_entry().await.map_err(
 				|source| tg::error!(!source, %path = path.display(), "failed to get directory entry"),
 			)?
 			else {
@@ -311,7 +307,7 @@ impl Server {
 			}
 			names.push(name);
 		}
-		drop(entries);
+		drop(read_dir);
 		drop(permit);
 
 		let vec: Vec<_> = names
@@ -340,6 +336,7 @@ impl Server {
 						subpath: None,
 						node: Some(node),
 						object: None,
+						path: None,
 						tag: None,
 					};
 					Ok::<_, tg::Error>(edge)
@@ -417,6 +414,7 @@ impl Server {
 								};
 								let dependency = tg::Referent {
 									item,
+									path: referent.path.clone(),
 									tag: referent.tag.clone(),
 									subpath: referent.subpath.clone(),
 								};
@@ -431,70 +429,15 @@ impl Server {
 			};
 			let edges = dependencies
 				.into_iter()
-				.map(|(reference, referent)| {
-					let arg = arg.clone();
-					async move {
-						// Get the root path.
-						let root_node = get_root_node(&state.read().await.graph, referrer).await;
-						let root_path = state.read().await.graph.nodes[root_node].arg.path.clone();
-
-						let id = referent.item;
-						let path = reference
-							.item()
-							.try_unwrap_path_ref()
-							.ok()
-							.or_else(|| reference.options()?.path.as_ref());
-
-						// Don't follow paths that point outside the root.
-						let referrer_path =
-							state.read().await.graph.nodes[referrer].arg.path.clone();
-						let is_external_path = path
-							.as_ref()
-							.map(|path| referrer_path.parent().unwrap().join(path))
-							.and_then(|path| path.diff(&root_path))
-							.map_or(false, |diff| {
-								diff.components().next().is_some_and(|component| {
-									matches!(component, std::path::Component::ParentDir)
-								})
-							});
-
-						// Recurse if necessary.
-						let (node, subpath) = match path {
-							Some(path) if !is_external_path => {
-								// Get the parent of the referrer.
-								let parent = state.read().await.graph.nodes[referrer]
-									.parent
-									.ok_or_else(|| tg::error!("expected a parent"))?;
-
-								// Collect the input of the referrent.
-								let node = self
-									.collect_input_inner(Some(parent), path, &arg, state, progress)
-									.await
-									.map_err(|source| {
-										tg::error!(!source, "failed to collect child input")
-									})?;
-								let (node, subpath) =
-									root_node_with_subpath(&state.read().await.graph, node).await;
-								(Some(node), subpath)
-							},
-							_ => (None, None),
-						};
-
-						let edge = Edge {
-							reference,
-							node,
-							object: Some(id),
-							subpath,
-							tag: referent.tag,
-						};
-
-						Ok::<_, tg::Error>(edge)
-					}
+				.map(|(reference, referent)| Edge {
+					reference,
+					node: None,
+					object: Some(referent.item),
+					subpath: referent.subpath,
+					path: referent.path,
+					tag: referent.tag,
 				})
-				.collect::<FuturesUnordered<_>>()
-				.try_collect()
-				.await?;
-
+				.collect();
 			return Ok(edges);
 		}
 
@@ -549,8 +492,8 @@ impl Server {
 							.path
 							.clone();
 
-						let absolute_path = path.parent().unwrap().join(import_path.strip_prefix("./").unwrap_or(import_path));
-						let is_external = absolute_path.diff(&root_path).map_or(false, |path| path.components().next().is_some_and(|component| matches!(component, std::path::Component::ParentDir)));
+						let absolute_path = crate::util::fs::canonicalize_parent(path.parent().unwrap().join(import_path)).await.map_err(|source| tg::error!(!source, "failed to canonicalize the path's parent"))?;
+						let is_external = absolute_path.strip_prefix(&root_path).is_err();
 
 						// If the import is of a module and points outside the root, return an error.
 						if (import_path.is_absolute() ||
@@ -574,13 +517,33 @@ impl Server {
 							self.collect_input_inner(Some(parent), import_path.as_ref(), &arg, state, progress).await.map_err(|source| tg::error!(!source, "failed to collect child input"))?
 						};
 
-						let (node, subpath) = root_node_with_subpath(&state.read().await.graph, child).await;
+
+						// If the child is a module and the import kind is not directory, get the subpath.
+						let (child_path, is_directory) = {
+							let state = state.read().await;
+							(state.graph.nodes[child].arg.path.clone(), state.graph.nodes[child].metadata.is_dir())
+						};
+						let (node, subpath) = if is_directory {
+							if matches!(&import.kind, Some(tg::module::Kind::Directory)) {
+								(child, None)
+							} else {
+								let _permit = self.file_descriptor_semaphore.acquire().await.unwrap();
+								let subpath = tg::package::try_get_root_module_file_name(self,Either::Right(&child_path)).await.map_err(|source| tg::error!(!source, %path = child_path.display(), "failed to get root module file name"))?
+									.map(PathBuf::from);
+								(child, subpath)
+							}
+						} else {
+							root_node_with_subpath(&state.read().await.graph, child).await
+						};
 
 						// Create the edge.
+						let package_path = state.read().await.graph.nodes[node].arg.path.clone();
+						let path = crate::util::path::diff(&arg.path, &package_path)?;
 						let edge = Edge {
 							reference,
 							node: Some(node),
 							object: None,
+							path: Some(path),
 							subpath,
 							tag: None,
 						};
@@ -592,6 +555,7 @@ impl Server {
 						reference: import.reference,
 						node: None,
 						object: None,
+						path: None,
 						subpath: None,
 						tag: None,
 					})
@@ -610,7 +574,7 @@ impl Server {
 		path: &Path,
 		arg: &tg::artifact::checkin::Arg,
 		state: &RwLock<State>,
-		progress: Option<&crate::progress::Handle<tg::artifact::checkin::Output>>,
+		_progress: Option<&crate::progress::Handle<tg::artifact::checkin::Output>>,
 	) -> tg::Result<Vec<Edge>> {
 		// Check if this node's edges have already been created.
 		let existing = state.read().await.graph.nodes[referrer].edges.clone();
@@ -625,55 +589,61 @@ impl Server {
 		)?;
 		drop(permit);
 
-		// Error if this is an absolute path.
+		// Error if this is an absolute path or empty.
 		if target.is_absolute() {
-			return Err(tg::error!("cannot check in an absolute path symlink"));
+			return Err(
+				tg::error!(%path = path.display(), %target = target.display(), "cannot check in an absolute path symlink"),
+			);
+		} else if target.as_os_str().is_empty() {
+			return Err(
+				tg::error!(%path = path.display(),  "cannot check in a path with an empty target"),
+			);
 		}
 
-		// Get the parent.
-		let parent = state.read().await.graph.nodes[referrer].parent;
+		// Get the full target by joining with the parent.
+		let target_absolute_path =
+			crate::util::fs::canonicalize_parent(path.parent().unwrap().join(&target))
+				.await
+				.map_err(|source| {
+					tg::error!(!source, "failed to canonicalize the path's parent")
+				})?;
 
-		// Get the absolute path of the target.
-		let target_absolute_path = path.parent().unwrap().join(&target);
-		let target_absolute_path = tokio::fs::canonicalize(&target_absolute_path.parent().unwrap())
-			.await
-			.map_err(|source| tg::error!(!source, %path = target_absolute_path.display(), "failed to canonicalize the path"))?
-			.join(target_absolute_path.file_name().unwrap());
-
-		// Collect the input of the target.
-		let node = if state
-			.read()
-			.await
-			.find_root_of_path(&target_absolute_path)
-			.await
-			.is_none()
-		{
-			Box::pin(self.collect_input_inner(
-				Some(referrer),
-				&target_absolute_path,
-				arg,
-				state,
-				progress,
-			))
-			.await?
+		// Check if this is a checkin of an artifact.
+		let path = crate::util::path::diff(&arg.path, &target_absolute_path)?;
+		let edge = if let Ok(subpath) = target_absolute_path.strip_prefix(self.artifacts_path()) {
+			let mut components = subpath.components();
+			let object = components
+				.next()
+				.ok_or_else(
+					|| tg::error!(%subpath = subpath.display(), "expected a subpath component"),
+				)?
+				.as_os_str()
+				.to_str()
+				.ok_or_else(|| tg::error!(%subpath = subpath.display(), "invalid subpath"))?
+				.parse()
+				.map_err(|_| tg::error!(%subpath = subpath.display(), "expected an object id"))?;
+			let subpath = components.collect();
+			Edge {
+				reference: tg::Reference::with_path(target),
+				subpath: Some(subpath),
+				node: None,
+				object: Some(object),
+				path: Some(path),
+				tag: None,
+			}
 		} else {
-			Box::pin(self.collect_input_inner(parent, &target, arg, state, progress)).await?
+			Edge {
+				reference: tg::Reference::with_path(target),
+				subpath: None,
+				node: None,
+				object: None,
+				path: Some(path),
+				tag: None,
+			}
 		};
-
-		// Get the root node and subpath.
-		let (root, subpath) = root_node_with_subpath(&state.read().await.graph, node).await;
-
-		Ok(vec![Edge {
-			reference: tg::Reference::with_path(target),
-			node: Some(root),
-			object: None,
-			subpath,
-			tag: None,
-		}])
+		Ok(vec![edge])
 	}
-}
 
-impl Server {
 	pub(super) async fn select_lockfiles(&self, graph: &mut Graph) -> tg::Result<()> {
 		let visited = RwLock::new(BTreeSet::new());
 		self.select_lockfiles_inner(graph, 0, &visited).await?;
@@ -802,7 +772,7 @@ async fn root_node_with_subpath(graph: &Graph, node: usize) -> (usize, Option<Pa
 	// Otherwise compute the subpath within the root.
 	let referent_path = graph.nodes[node].arg.path.clone();
 	let root_path = graph.nodes[root].arg.path.clone();
-	let subpath = referent_path.diff(&root_path).unwrap();
+	let subpath = referent_path.strip_prefix(&root_path).unwrap().to_owned();
 
 	// Return the root node and subpath.
 	(root, Some(subpath))
@@ -818,14 +788,14 @@ impl State {
 		let mut dangling = Vec::new();
 		for root in &self.roots {
 			let old_path = self.graph.nodes[*root].arg.path.clone();
-			let diff = new_path.diff(&old_path).unwrap();
-			if let Ok(child) = diff.strip_prefix("./") {
+			if let Ok(child) = new_path.strip_prefix(&old_path) {
 				let dangling_directory = new_path.join(child.ancestors().last().unwrap());
 				dangling.push(dangling_directory);
 			} else {
 				roots.push(*root);
 			}
 		}
+
 		// Add the new node to the new list of roots.
 		if roots.is_empty() {
 			roots.push(node);
@@ -837,15 +807,6 @@ impl State {
 		// Return any dangling directories.
 		dangling
 	}
-
-	async fn find_root_of_path(&self, path: &Path) -> Option<usize> {
-		for root in &self.roots {
-			if path.strip_prefix(&self.graph.nodes[*root].arg.path).is_ok() {
-				return Some(*root);
-			}
-		}
-		None
-	}
 }
 
 async fn get_root_node(graph: &Graph, mut node: usize) -> usize {
@@ -854,5 +815,28 @@ async fn get_root_node(graph: &Graph, mut node: usize) -> usize {
 			return node;
 		};
 		node = parent;
+	}
+}
+
+impl std::fmt::Display for Edge {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "(reference: {}", self.reference)?;
+		if let Some(node) = &self.node {
+			write!(f, ", node: {node}")?;
+		}
+		if let Some(object) = &self.object {
+			write!(f, ", object: {object}")?;
+		}
+		if let Some(path) = &self.path {
+			write!(f, ", path: {}", path.display())?;
+		}
+		if let Some(subpath) = &self.subpath {
+			write!(f, ", subpath: {}", subpath.display())?;
+		}
+		if let Some(tag) = &self.tag {
+			write!(f, ", tag: {tag}")?;
+		}
+		write!(f, ")")?;
+		Ok(())
 	}
 }
