@@ -90,3 +90,24 @@ impl Drop for Temp {
 		}
 	}
 }
+
+#[tokio::test]
+async fn test_macro(){
+	let temp = Temp::new();
+	let artifact = directory! {
+		"directory" => directory! {
+			"a" => directory! {
+				"b" => directory! {
+					"c" => symlink!("../../a/d/e")
+				},
+				"d" => directory! {
+					"e" => symlink!("../../a/f/g"),
+				},
+				"f" => directory! {
+					"g" => ""
+				}
+			},
+		},
+	};
+	artifact.to_path(temp.as_ref()).await.unwrap();
+}
